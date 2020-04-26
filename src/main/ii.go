@@ -20,7 +20,7 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	words := strings.FieldsFunc(value, func(r rune) bool {
 		return !unicode.IsLetter(r)
 	})
-	
+
 	exist := make(map[string]bool)
 	for _, word := range words {
 		if _, ok := exist[word]; ok {
@@ -28,7 +28,7 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 		}
 		exist[word] = true
 	}
-	
+
 	result := make([]mapreduce.KeyValue, 0)
 	for word, _ := range exist {
 		kv := mapreduce.KeyValue{

@@ -25,12 +25,12 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 	for _, word := range words {
 		counter[word]++
 	}
-	
+
 	results := make([]mapreduce.KeyValue, 0)
 	for word, count := range counter {
 		freq := mapreduce.KeyValue{
-				Key:   word,
-				Value: strconv.Itoa(count),
+			Key:   word,
+			Value: strconv.Itoa(count),
 		}
 		results = append(results, freq)
 	}
@@ -46,8 +46,8 @@ func reduceF(key string, values []string) string {
 	// Your code here (Part II).
 	frequence := 0
 	for _, value := range values {
-			count, _ := strconv.Atoi(value)
-			frequence = frequence + count
+		count, _ := strconv.Atoi(value)
+		frequence = frequence + count
 	}
 	return strconv.Itoa(frequence)
 }
