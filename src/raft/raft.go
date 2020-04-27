@@ -161,11 +161,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	} else if args.Term > rf.currentTerm {
 		// DPrintf("%v vote to %v, local term %v, rpc term %v", rf.me, args.CandidateId, rf.currentTerm, args.Term)
-		rf.currentTerm = args.Term
+		rf.changeToFollower(args.Term)
 		rf.votedFor = args.CandidateId
 		reply.Term = args.Term
 		reply.VoteGranted = true
-		rf.changeToState(STATE_FOLLOWER)
+
 	} else if rf.votedFor != -1 {
 		reply.VoteGranted = false
 	}
@@ -221,8 +221,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		// DPrintf("=====> %v found itself not the leader any more. local term %v, remote term %v", rf.me, rf.currentTerm, args.Term)
 		// DPrintf("%v starts to change state to FOLLOWER", rf.me)
-		rf.currentTerm = args.Term
-		rf.changeToState(STATE_FOLLOWER)
+		rf.changeToFollower(args.Term)
 	} else if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 	}
@@ -312,7 +311,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case <-rf.electionTimer.C:
 				rf.mu.Lock()
 				// DPrintf("%v election Timer timeout local term %v, local state %v", rf.me, rf.currentTerm, rf.state)
-				rf.changeToState(STATE_CANDIDATE)
+				rf.changeToCandidate()
 				rf.mu.Unlock()
 
 			// heartbeat timeout
@@ -354,16 +353,17 @@ func (rf *Raft) startElection() {
 
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(serverId, &request, &reply) {
-				if reply.VoteGranted && rf.state == STATE_CANDIDATE {
+				if rf.state != STATE_CANDIDATE {
+					return
+				} else if reply.VoteGranted {
 					atomic.AddInt32(&voteCount, 1)
 					// DPrintf("%v receives vote from %v, new term: %v", rf.me, serverId, rf.currentTerm)
 					if atomic.LoadInt32(&voteCount) > int32(len(rf.peers)/2) {
-						rf.changeToState(STATE_LEADER)
+						rf.changeToLeader()
 						// DPrintf("=====> %v becomes LEADER, new term: %v", rf.me, rf.currentTerm)
-					} else if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.changeToState(STATE_FOLLOWER)
 					}
+				} else if reply.Term > rf.currentTerm {
+					rf.changeToFollower(reply.Term)
 				}
 			} else {
 				// DPrintf("%v send request vote to %d failed", rf.me, serverId)
@@ -390,7 +390,7 @@ func (rf *Raft) broadcastHeartbeat() {
 				// DPrintf("%v received heartbeat reply, local term %v, remote term %v", rf.me, rf.currentTerm, reply.Term)
 				if reply.Term > rf.currentTerm {
 					// DPrintf("=====> %v found itself not the leader any more. local term %v, remote term %v", rf.me, rf.currentTerm, reply.Term)
-					rf.changeToState(STATE_FOLLOWER)
+					rf.changeToFollower(reply.Term)
 				}
 			} else {
 				// DPrintf("%v broadcast heartbeat to %d failed", rf.me, serverId)
@@ -399,30 +399,27 @@ func (rf *Raft) broadcastHeartbeat() {
 	}
 }
 
-func (rf *Raft) changeToState(state int) {
-	rf.state = state
-	if state == STATE_CANDIDATE {
-		// DPrintf("%v becomes CANDIDATE", rf.me)
-	} else if state == STATE_FOLLOWER {
-		// DPrintf("%v becomes FOLLOWER", rf.me)
-	} else {
-		DPrintf("=====> %v becomes LEADER, local term %v", rf.me, rf.currentTerm)
-	}
-	switch state {
-	case STATE_FOLLOWER:
-		rf.heartbeatTimer.Stop()
-		rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
-		rf.votedFor = -1
+func (rf *Raft) changeToFollower(term int) {
+	rf.state = STATE_FOLLOWER
+	rf.currentTerm = term
+	rf.votedFor = -1
+	rf.heartbeatTimer.Stop()
+	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+	// DPrintf("%v becomes FOLLOWER, local term %v", rf.me, rf.currentTerm)
+}
 
-	case STATE_CANDIDATE:
-		// the only thing that candidate does is to start an election
-		rf.startElection()
+func (rf *Raft) changeToCandidate() {
+	rf.state = STATE_CANDIDATE
+	rf.startElection()
+	// DPrintf("%v becomes CANDIDATE, local term %v", rf.me, rf.currentTerm)
+}
 
-	case STATE_LEADER:
-		rf.electionTimer.Stop()
-		rf.broadcastHeartbeat()
-		rf.heartbeatTimer.Reset(HeartbeatInterval)
-	}
+func (rf *Raft) changeToLeader() {
+	rf.state = STATE_LEADER
+	rf.heartbeatTimer.Reset(HeartbeatInterval)
+	rf.electionTimer.Stop()
+	rf.broadcastHeartbeat()
+	DPrintf("=====> %v becomes LEADER, local term %v", rf.me, rf.currentTerm)
 }
 
 func randTimeDuration(lower int, upper int) time.Duration {

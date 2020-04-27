@@ -1,3 +1,4 @@
 *.code-workspace
 bin/*
 pkg/*
+.vscode/*
