@@ -19,7 +19,6 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -156,7 +155,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logs) != nil {
-		fmt.Errorf("[readPersist]: Decode Error!\n")
+		DPrintf("[readPersist]: Decode Error!\n")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -432,7 +431,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	rf.matchIndex = make([]int, len(peers))
 	rf.applyCh = applyCh
-	go rf.raftLoop()
+
+	go rf.runServer()
+
 	// initialize from state persisted before a crash
 	rf.mu.Lock()
 	rf.readPersist(persister.ReadRaftState())
@@ -453,7 +454,7 @@ func (rf *Raft) resetHeartbeatTimer() {
 	rf.heartbeatTimer.Reset(HEARTBEAT_TIME)
 }
 
-func (rf *Raft) raftLoop() {
+func (rf *Raft) runServer() {
 	rf.mu.Lock()
 	rf.electionTimer = time.NewTimer(randTimeDuration(ELEC_TIME_LOWER, ELEC_TIME_UPPER))
 	rf.heartbeatTimer = time.NewTimer(HEARTBEAT_TIME)
@@ -507,7 +508,7 @@ func (rf *Raft) changeToState(state int) {
 		rf.resetHeartbeatTimer()
 
 	default:
-		fmt.Printf("Warning: invaid state %d, do nothing\n", state)
+		DPrintf("Warning: invaid state %d, do nothing\n", state)
 	}
 }
 
@@ -543,7 +544,7 @@ func (rf *Raft) broadcastVoteRequests() {
 					rf.votes++
 					if rf.votes > len(rf.peers)/2 {
 						rf.changeToState(STATE_LEADER)
-						//fmt.Printf("Term %d: %d is the new leader\n", rf.currentTerm, rf.me)
+						DPrintf("Term %d: %d is the new leader\n", rf.currentTerm, rf.me)
 					}
 				} else if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
