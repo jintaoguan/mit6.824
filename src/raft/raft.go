@@ -20,6 +20,7 @@ package raft
 import (
 	"labrpc"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -237,7 +238,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// DPrintf("%v starts to change state to FOLLOWER", rf.me)
 		rf.changeToFollower(args.Term)
 	} else if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
+		// reply.Term = rf.currentTerm
+		reply.Success = false
 	}
 
 }
@@ -268,9 +270,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isLeader = rf.state == STATE_LEADER
+	if isLeader {
+		// if this is the leader, keep taking new log
+		newLogEntry := LogEntry{
+			Term:    rf.currentTerm,
+			Command: command,
+		}
+		rf.log = append(rf.log, newLogEntry)
+		DPrintf("%v gets new log. command %v", rf.me, command)
+	}
 
 	return index, term, isLeader
 }
+
+// func (rf *Raft) getLastLogIndex() int {
+// 	return len(rf.log) - 1
+// }
 
 //
 // the tester calls Kill() when a Raft instance won't
@@ -315,6 +334,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 	rf.heartbeatTimer = time.NewTimer(HeartbeatInterval)
 	// DPrintf("!!!!! %v raft server startup(). state %v, local term %v", rf.me, rf.state, rf.currentTerm)
+
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.log = make([]LogEntry, 0)
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
 	rf.mu.Unlock()
 
 	// main loop
@@ -334,7 +360,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case <-rf.heartbeatTimer.C:
 				rf.mu.Lock()
 				// DPrintf("%v heartbeat Timer timeout local term %v, local state %v", rf.me, rf.currentTerm, rf.state)
-				rf.broadcastHeartbeat()
+				if rf.state == STATE_LEADER {
+					rf.broadcastHeartbeat()
+				}
 				rf.mu.Unlock()
 			}
 		}
@@ -387,18 +415,28 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) broadcastHeartbeat() {
+	DPrintf("--------> %v broadcast heartbeat %v", rf.me, len(rf.log))
 	// send heartbeat to everyone to claim the leadership
 	rf.heartbeatTimer.Reset(HeartbeatInterval)
 
-	request := AppendEntriesArgs{
-		Term: rf.currentTerm,
-	}
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(serverId int) {
 			// DPrintf("%v broadcast heartbeat to %v", rf.me, serverId)
+			entries := make([]LogEntry, 0)
+			if rf.getLastLogIndex() >= 0 {
+				entries = append(entries)
+			}
+			request := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+				// PrevLogIndex: rf.log[rf.nextIndex[serverId]].Index,
+				// PrevLogTerm:  rf.log[rf.nextIndex[serverId]].Term,
+				// Entries:      append([]LogEntry{}, rf.log[rf.nextIndex[serverId]:]...),
+				LeaderCommit: rf.commitIndex,
+			}
 			reply := AppendEntriesReply{}
 			if rf.sendAppendEntries(serverId, &request, &reply) {
 				// DPrintf("%v received heartbeat reply, local term %v, remote term %v", rf.me, rf.currentTerm, reply.Term)
@@ -406,6 +444,14 @@ func (rf *Raft) broadcastHeartbeat() {
 					// DPrintf("=====> %v found itself not the leader any more. local term %v, remote term %v", rf.me, rf.currentTerm, reply.Term)
 					rf.changeToFollower(reply.Term)
 				}
+				if reply.Success {
+					rf.matchIndex[serverId] = request.PrevLogIndex + len(request.Entries)
+					rf.nextIndex[serverId] = rf.matchIndex[serverId] + 1
+					rf.commitLogs()
+				}
+				// } else {
+				// 	rf.nextIndex[serverId] = rf.nextIndex[serverId] - 1
+				// }
 			} else {
 				// DPrintf("%v broadcast heartbeat to %d failed", rf.me, serverId)
 			}
@@ -413,27 +459,56 @@ func (rf *Raft) broadcastHeartbeat() {
 	}
 }
 
+func (rf *Raft) getLastLogTerm() int {
+	if len(rf.log) == 0 {
+		return -1
+	}
+	return rf.log[len(rf.log)-1].Term
+}
+
+func (rf *Raft) getLastLogIndex() int {
+	if len(rf.log) == 0 {
+		return -1
+	}
+	return rf.log[len(rf.log)-1].Index
+}
+
+// sort the matchIndex to find the lowest match index among the majorities that have higher match index
+// the leader's new commit index will be the new match index
+func (rf *Raft) commitLogs() {
+	rf.matchIndex[rf.me] = len(rf.log) - 1
+	matchIndexCopy := make([]int, len(rf.peers))
+	copy(matchIndexCopy, rf.matchIndex)
+	sort.Ints(matchIndexCopy)
+	nextCommitIndex := matchIndexCopy[len(matchIndexCopy)/2]
+	// IMPORTANT: make sure all the commits have to be in the same term
+	if nextCommitIndex > rf.commitIndex && rf.log[nextCommitIndex].Term == rf.currentTerm {
+		rf.commitIndex = nextCommitIndex
+	}
+}
+
 func (rf *Raft) changeToFollower(term int) {
 	rf.state = STATE_FOLLOWER
+	// DPrintf("%v becomes FOLLOWER, local term %v", rf.me, rf.currentTerm)
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.heartbeatTimer.Stop()
 	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
-	// DPrintf("%v becomes FOLLOWER, local term %v", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) changeToCandidate() {
 	rf.state = STATE_CANDIDATE
-	rf.startElection()
 	// DPrintf("%v becomes CANDIDATE, local term %v", rf.me, rf.currentTerm)
+	rf.startElection()
 }
 
 func (rf *Raft) changeToLeader() {
 	rf.state = STATE_LEADER
+	DPrintf("=====> %v becomes LEADER, local term %v", rf.me, rf.currentTerm)
 	rf.heartbeatTimer.Reset(HeartbeatInterval)
 	rf.electionTimer.Stop()
 	rf.broadcastHeartbeat()
-	DPrintf("=====> %v becomes LEADER, local term %v", rf.me, rf.currentTerm)
+
 }
 
 func randTimeDuration(lower int, upper int) time.Duration {
